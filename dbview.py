@@ -14,7 +14,7 @@ print("Tables:", tables)
 
 # View contents of a specific table (replace 'your_table' with the table name)
 try:
-    cursor.execute("SELECT * FROM fund;")
+    cursor.execute("SELECT * FROM investor;")
     rows = cursor.fetchall()
     print("Number of rows:", len(rows))
     for row in rows:

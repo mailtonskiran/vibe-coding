@@ -13,6 +13,21 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # Models
+class FundMaster(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    fund_name = db.Column(db.String(100), nullable=False)
+    asset_class = db.Column(db.String(50), nullable=False)
+    category = db.Column(db.String(50))
+    expected_return = db.Column(db.Float, nullable=False)
+    risk_level = db.Column(db.String(20))
+    min_investment = db.Column(db.Float, nullable=False)
+
+class AssetAllocation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    risk_profile = db.Column(db.String(30), nullable=False)
+    asset_class = db.Column(db.String(50), nullable=False)
+    percentage = db.Column(db.Float, nullable=False)
+
 class Investor(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
@@ -193,39 +208,21 @@ class Investor(db.Model):
         """Get recommended asset allocation based on risk profile"""
         risk_tolerance = self.determine_risk_tolerance()
         
-        # Asset allocation matrix based on risk profile
-        allocation_matrix = {
-            'Conservative': {
-                'equity': 10,
-                'hybrid_baf': 20,
-                'debt_arbitrage': 60,
-                'international_equity': 5,
-                'gold': 5
-            },
-            'Cautious': {
-                'equity': 25,
-                'hybrid_baf': 35,
-                'debt_arbitrage': 30,
-                'international_equity': 5,
-                'gold': 5
-            },
-            'Moderate': {
-                'equity': 50,
-                'hybrid_baf': 25,
-                'debt_arbitrage': 15,
-                'international_equity': 5,
-                'gold': 5
-            },
-            'Aggressive': {
-                'equity': 70,
-                'hybrid_baf': 15,
-                'debt_arbitrage': 5,
-                'international_equity': 7,
-                'gold': 3
-            }
-        }
+        # Query asset allocation from database
+        allocation_rows = AssetAllocation.query.filter_by(risk_profile=risk_tolerance).all()
         
-        return allocation_matrix.get(risk_tolerance, allocation_matrix['Conservative'])
+        # Convert to dictionary format
+        allocation = {}
+        for row in allocation_rows:
+            allocation[row.asset_class] = row.percentage
+        
+        # Fallback to Conservative if no data found
+        if not allocation:
+            allocation_rows = AssetAllocation.query.filter_by(risk_profile='Conservative').all()
+            for row in allocation_rows:
+                allocation[row.asset_class] = row.percentage
+        
+        return allocation
     
     def calculate_portfolio_amounts(self):
         """Calculate actual investment amounts for each asset class"""
@@ -355,53 +352,70 @@ def create_investor():
         db.session.rollback()
         return jsonify({'error': f'Failed to create investor: {str(e)}'}), 500
 
-@app.route('/api/portfolios/<int:investor_id>', methods=['POST'])
+@app.route('/api/portfolio/<int:investor_id>', methods=['POST'])
 def create_portfolio(investor_id):
-    data = request.get_json()
     investor = Investor.query.get_or_404(investor_id)
-    new_portfolio = Portfolio(
-        name=data['name'],
-        investor_id=investor.id
-    )
+    data = request.get_json()
+
+    recommendations = data.get('recommendations')
+    if not recommendations:
+        return jsonify({'error': 'No recommendations provided'}), 400
+
+    # Create a new portfolio
+    portfolio_name = f"{investor.name}'s Recommended Portfolio - {datetime.utcnow().strftime('%Y-%m-%d')}"
+    new_portfolio = Portfolio(investor_id=investor.id, name=portfolio_name)
     db.session.add(new_portfolio)
+    db.session.flush()  # Use flush to assign an ID to new_portfolio before commit
+
+    # Add funds to the portfolio
+    for rec in recommendations:
+        new_fund = Fund(
+            portfolio_id=new_portfolio.id,
+            fund_name=rec['fund_name'],
+            amount=rec['recommended_investment'],
+            expected_return=rec['expected_return']
+        )
+        db.session.add(new_fund)
+
     db.session.commit()
-    return jsonify({'message': 'Portfolio created successfully'}), 201
+    
+    return jsonify({'message': 'Portfolio created successfully', 'portfolio_id': new_portfolio.id}), 201
+
+@app.route('/api/portfolio/<int:investor_id>', methods=['GET'])
+def get_portfolio(investor_id):
+    # Find the most recent portfolio for the investor
+    portfolio = Portfolio.query.filter_by(investor_id=investor_id).order_by(Portfolio.created_at.desc()).first()
+
+    if not portfolio:
+        return jsonify({'error': 'No portfolio found for this investor.'}), 404
+
+    # Get the investor's name
+    investor = Investor.query.get_or_404(investor_id)
+
+    # Get the funds associated with this portfolio
+    funds = Fund.query.filter_by(portfolio_id=portfolio.id).all()
+
+    portfolio_data = {
+        'investor_name': investor.name,
+        'portfolio_id': portfolio.id,
+        'portfolio_name': portfolio.name,
+        'created_at': portfolio.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+        'funds': [
+            {
+                'fund_name': fund.fund_name,
+                'amount': fund.amount,
+                'expected_return': fund.expected_return,
+                # Attempt to get asset_class from FundMaster
+                'asset_class': FundMaster.query.filter_by(fund_name=fund.fund_name).first().asset_class or 'N/A'
+            } for fund in funds
+        ]
+    }
+
+    return jsonify(portfolio_data), 201
 
 @app.route('/api/recommendations/<int:investor_id>', methods=['GET'])
 def get_recommendations(investor_id):
     investor = Investor.query.get_or_404(investor_id)
-    
-    # Define comprehensive fund database by asset class
-    fund_database = {
-        'equity': [
-            {'fund_name': 'Large Cap Equity Fund', 'expected_return': 12.0, 'risk_level': 'Medium', 'min_investment': 5000, 'category': 'Large Cap'},
-            {'fund_name': 'Mid Cap Equity Fund', 'expected_return': 15.0, 'risk_level': 'High', 'min_investment': 10000, 'category': 'Mid Cap'},
-            {'fund_name': 'Small Cap Equity Fund', 'expected_return': 18.0, 'risk_level': 'Very High', 'min_investment': 10000, 'category': 'Small Cap'},
-            {'fund_name': 'Multi Cap Equity Fund', 'expected_return': 14.0, 'risk_level': 'High', 'min_investment': 5000, 'category': 'Multi Cap'},
-        ],
-        'hybrid_baf': [
-            {'fund_name': 'Balanced Advantage Fund', 'expected_return': 11.0, 'risk_level': 'Medium', 'min_investment': 5000, 'category': 'Balanced'},
-            {'fund_name': 'Conservative Hybrid Fund', 'expected_return': 9.5, 'risk_level': 'Low', 'min_investment': 5000, 'category': 'Conservative Hybrid'},
-            {'fund_name': 'Aggressive Hybrid Fund', 'expected_return': 13.0, 'risk_level': 'Medium-High', 'min_investment': 5000, 'category': 'Aggressive Hybrid'},
-            {'fund_name': 'Multi Asset Fund', 'expected_return': 10.5, 'risk_level': 'Medium', 'min_investment': 5000, 'category': 'Multi Asset'},
-        ],
-        'debt_arbitrage': [
-            {'fund_name': 'Liquid Fund', 'expected_return': 6.5, 'risk_level': 'Very Low', 'min_investment': 1000, 'category': 'Liquid'},
-            {'fund_name': 'Ultra Short Duration Fund', 'expected_return': 7.0, 'risk_level': 'Very Low', 'min_investment': 1000, 'category': 'Ultra Short'},
-            {'fund_name': 'Short Duration Fund', 'expected_return': 7.5, 'risk_level': 'Low', 'min_investment': 5000, 'category': 'Short Duration'},
-            {'fund_name': 'Corporate Bond Fund', 'expected_return': 8.5, 'risk_level': 'Low', 'min_investment': 5000, 'category': 'Corporate Bond'},
-            {'fund_name': 'Arbitrage Fund', 'expected_return': 6.8, 'risk_level': 'Very Low', 'min_investment': 5000, 'category': 'Arbitrage'},
-        ],
-        'international_equity': [
-            {'fund_name': 'US Equity Fund', 'expected_return': 13.5, 'risk_level': 'High', 'min_investment': 5000, 'category': 'US Equity'},
-            {'fund_name': 'Global Equity Fund', 'expected_return': 12.8, 'risk_level': 'High', 'min_investment': 5000, 'category': 'Global Equity'},
-            {'fund_name': 'Emerging Markets Fund', 'expected_return': 15.0, 'risk_level': 'Very High', 'min_investment': 10000, 'category': 'Emerging Markets'},
-        ],
-        'gold': [
-            {'fund_name': 'Gold ETF Fund', 'expected_return': 8.0, 'risk_level': 'Medium', 'min_investment': 1000, 'category': 'Gold ETF'},
-            {'fund_name': 'Gold Fund of Funds', 'expected_return': 7.8, 'risk_level': 'Medium', 'min_investment': 1000, 'category': 'Gold FoF'},
-        ]
-    }
     
     # Calculate financial health metrics
     net_worth = investor.existing_assets - investor.existing_liabilities
@@ -418,27 +432,28 @@ def get_recommendations(investor_id):
 
     for asset_class, amount in portfolio_amounts.items():
         if amount > 0:
-            available_funds = fund_database.get(asset_class, [])
+            # Query available funds from database for this asset class
+            available_funds = FundMaster.query.filter_by(asset_class=asset_class).all()
             if not available_funds:
                 continue
 
             # Find funds the investor can afford with the allocated amount
-            affordable_funds = [f for f in available_funds if f['min_investment'] <= amount]
+            affordable_funds = [f for f in available_funds if f.min_investment <= amount]
 
             best_fund = None
             if affordable_funds:
                 # From affordable funds, pick the one with the highest return
-                best_fund = max(affordable_funds, key=lambda x: x['expected_return'])
+                best_fund = max(affordable_funds, key=lambda x: x.expected_return)
             elif available_funds:
                 # If none are affordable, recommend the one with the lowest min investment as a fallback
-                best_fund = min(available_funds, key=lambda x: x['min_investment'])
+                best_fund = min(available_funds, key=lambda x: x.min_investment)
 
             if best_fund:
                 recommendations.append({
                     'asset_class': asset_class.replace('_', ' ').title(),
-                    'fund_name': best_fund['fund_name'],
+                    'fund_name': best_fund.fund_name,
                     'recommended_investment': round(amount, 2),
-                    'expected_return': best_fund['expected_return']
+                    'expected_return': best_fund.expected_return
                 })
 
     # Generate financial health assessment
